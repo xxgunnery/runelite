@@ -25,8 +25,13 @@
 package net.runelite.client.plugins.playerindicators;
 
 import com.google.inject.Provides;
+import java.awt.Color;
+import java.util.ArrayList;
+import java.util.List;
 import javax.inject.Inject;
+import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.FriendsChatRank;
 import static net.runelite.api.FriendsChatRank.UNRANKED;
@@ -50,7 +55,10 @@ import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.widgets.WidgetInfo;
+import net.runelite.client.Notifier;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.chat.ChatColorType;
+import net.runelite.client.chat.ChatMessageBuilder;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ProfileChanged;
@@ -60,15 +68,15 @@ import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ColorUtil;
 
-@PluginDescriptor(
-	name = "Player Indicators",
-	description = "Highlight players on-screen and/or on the minimap",
-	tags = {"highlight", "minimap", "overlay", "players"}
-)
+@PluginDescriptor(name = "Player Indicators", description = "Highlight players on-screen and/or on the minimap", tags = {"highlight", "minimap", "overlay", "players"})
 @Slf4j
 public class PlayerIndicatorsPlugin extends Plugin
 {
 	private static final String TRADING_WITH_TEXT = "Trading with: ";
+
+	private static int tickNumber = 0;
+
+	private static List<String> previousPlayers = new ArrayList<>();
 
 	@Inject
 	private OverlayManager overlayManager;
@@ -90,6 +98,9 @@ public class PlayerIndicatorsPlugin extends Plugin
 
 	@Inject
 	private Client client;
+
+	@Inject
+	private Notifier notifier;
 
 	@Inject
 	private ChatIconManager chatIconManager;
@@ -131,15 +142,7 @@ public class PlayerIndicatorsPlugin extends Plugin
 
 	private void migrate()
 	{
-		String[] keys = {
-			"drawOwnName", "highlightSelf",
-			"drawPartyMembers", "highlightPartyMembers",
-			"drawFriendNames", "highlightFriends",
-			"drawClanMemberNames", "highlightFriendsChat",
-			"drawTeamMemberNames", "highlightTeamMembers",
-			"drawClanChatMemberNames", "highlightClanMembers",
-			"drawNonClanMemberNames", "highlightOthers"
-		};
+		String[] keys = {"drawOwnName", "highlightSelf", "drawPartyMembers", "highlightPartyMembers", "drawFriendNames", "highlightFriends", "drawClanMemberNames", "highlightFriendsChat", "drawTeamMemberNames", "highlightTeamMembers", "drawClanChatMemberNames", "highlightClanMembers", "drawNonClanMemberNames", "highlightOthers"};
 
 		Boolean disableOutsidePvP = configManager.getConfiguration(PlayerIndicatorsConfig.GROUP, "disableOutsidePvP", Boolean.class);
 		if (disableOutsidePvP != null)
@@ -177,12 +180,115 @@ public class PlayerIndicatorsPlugin extends Plugin
 		}
 	}
 
+	private static int extractLevel(String line)
+	{
+		String[] parts = line.split(":");
+		return Integer.parseInt(parts[1].trim());
+	}
+
 	@Subscribe
 	public void onClientTick(ClientTick clientTick)
 	{
+		tickNumber += 1;
+
 		if (client.isMenuOpen())
 		{
 			return;
+		}
+
+		Player mainPlayer = client.getLocalPlayer();
+
+		Widget wildernessLevel = client.getWidget(WidgetInfo.PVP_WILDERNESS_LEVEL);
+		String widgetText = wildernessLevel.getText();
+
+		if (!widgetText.equals("--") && !widgetText.equals("Level: --") && !widgetText.equals(""))
+		{
+			String[] lines = new String[2];
+			if (widgetText.contains("\n"))
+			{
+				lines = widgetText.split("\n");
+			}
+			else if (widgetText.contains("<br>"))
+			{
+				lines = widgetText.split("<br>");
+			}
+
+			String[] rangeValues = lines[1].split("-");
+			int minValue = Integer.parseInt(rangeValues[0].trim());
+			int maxValue = Integer.parseInt(rangeValues[1].trim());
+
+			List<Player> players = client.getPlayers();
+			List<Player> attackablePlayers = new ArrayList<>();
+
+			for (Player player : players)
+			{
+				String playerName = player.getName();
+				if (!playerName.equals(mainPlayer.getName()))
+				{
+					int playerLevel = player.getCombatLevel();
+
+					if (playerLevel >= minValue && playerLevel <= maxValue)
+					{
+						attackablePlayers.add(player);
+					}
+				}
+			}
+
+			if (attackablePlayers != null && attackablePlayers.size() != 0)
+			{
+				if (tickNumber % 30 == 0)
+				{
+					boolean shouldAddMessage = false;
+					String message = "";
+					int key = 1;
+
+					for (Player player : attackablePlayers)
+					{
+						String playerName = player.getName();
+						if (!previousPlayers.contains(playerName))
+						{
+							shouldAddMessage = true;
+						}
+
+						int playerLevel = player.getCombatLevel();
+
+						message += playerName + " (level " + playerLevel + ")";
+						if (key != attackablePlayers.size())
+						{
+							message += ", ";
+						}
+
+						key += 1;
+					}
+
+					message += " can attack you!!";
+
+					if (shouldAddMessage)
+					{
+						log.debug(message);
+						notifier.notify(message);
+
+						String response = new ChatMessageBuilder()
+							.append(ChatColorType.HIGHLIGHT)
+							.append(message)
+							.build();
+
+						client.addChatMessage(ChatMessageType.PUBLICCHAT, "NOTICE", response, "Wildy Powian");
+						client.refreshChat();
+
+						attackablePlayers.forEach(player -> previousPlayers.add(player.getName()));
+					}
+
+					attackablePlayers.clear();
+				}
+
+				if (tickNumber % 2000 == 0)
+				{
+					client.addChatMessage(ChatMessageType.PUBLICCHAT, "NOTICE", "Resetting alert list...", "Wildy Powian");
+					previousPlayers.clear();
+				}
+
+			}
 		}
 
 		MenuEntry[] menuEntries = client.getMenuEntries();
@@ -191,18 +297,7 @@ public class PlayerIndicatorsPlugin extends Plugin
 		{
 			MenuAction type = entry.getType();
 
-			if (type == WALK
-				|| type == WIDGET_TARGET_ON_PLAYER
-				|| type == ITEM_USE_ON_PLAYER
-				|| type == PLAYER_FIRST_OPTION
-				|| type == PLAYER_SECOND_OPTION
-				|| type == PLAYER_THIRD_OPTION
-				|| type == PLAYER_FOURTH_OPTION
-				|| type == PLAYER_FIFTH_OPTION
-				|| type == PLAYER_SIXTH_OPTION
-				|| type == PLAYER_SEVENTH_OPTION
-				|| type == PLAYER_EIGHTH_OPTION
-				|| type == RUNELITE_PLAYER)
+			if (type == WALK || type == WIDGET_TARGET_ON_PLAYER || type == ITEM_USE_ON_PLAYER || type == PLAYER_FIRST_OPTION || type == PLAYER_SECOND_OPTION || type == PLAYER_THIRD_OPTION || type == PLAYER_FOURTH_OPTION || type == PLAYER_FIFTH_OPTION || type == PLAYER_SIXTH_OPTION || type == PLAYER_SEVENTH_OPTION || type == PLAYER_EIGHTH_OPTION || type == RUNELITE_PLAYER)
 			{
 				Player[] players = client.getCachedPlayers();
 				Player player = null;
@@ -280,8 +375,7 @@ public class PlayerIndicatorsPlugin extends Plugin
 	{
 		if (event.getScriptId() == ScriptID.TRADE_MAIN_INIT)
 		{
-			clientThread.invokeLater(() ->
-			{
+			clientThread.invokeLater(() -> {
 				Widget tradeTitle = client.getWidget(WidgetInfo.TRADE_WINDOW_HEADER);
 				String header = tradeTitle.getText();
 				String playerName = header.substring(TRADING_WITH_TEXT.length());
